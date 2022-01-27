@@ -31,7 +31,7 @@ import sys
 import tempfile
 from glob import glob
 from os import chdir, getcwd, environ, pathsep
-from subprocess import call
+from subprocess import call, Popen, PIPE
 from shutil import rmtree, copy
 from xml.dom import minidom
 
@@ -43,6 +43,8 @@ from IPython.core.magic_arguments import (
     argument, magic_arguments, parse_argstring
 )
 from IPython.utils.py3compat import unicode_to_str
+
+from myst_nb import glue
 
 try:
     import pkg_resources  # part of setuptools
@@ -124,7 +126,7 @@ class TikzMagics(Magics):
             # search path (otherwise we would lose access to all packages)
 
         try:
-            retcode = call("pdflatex --shell-escape tikz.tex", shell=True, env=env)
+            retcode = call("pdflatex -interaction=batchmode tikz.tex > /dev/null", shell=True, env=env)
             if retcode != 0:
                 print("LaTeX terminated with signal", -retcode, file=sys.stderr)
                 ret_log = True
@@ -156,6 +158,19 @@ class TikzMagics(Magics):
                 print("pdf2svg terminated with signal", -retcode, file=sys.stderr)
         except OSError as e:
             print("pdf2svg execution failed:", e, file=sys.stderr)
+
+        chdir(current_dir)
+    
+    def _convert_svg_to_png(self, dir, width, height):
+        current_dir = getcwd()
+        chdir(dir)
+
+        try:
+            retcode = call("inkscape -w %s -h %s tikz.svg -o tikz.png" % (width, height), shell=True)
+            if retcode != 0:
+                print("inkscape terminated with signal", -retcode, file=sys.stderr)
+        except OSError as e:
+            print("inkscape execution failed:", e, file=sys.stderr)
 
         chdir(current_dir)
 
@@ -208,6 +223,10 @@ class TikzMagics(Magics):
     @argument(
         '-g', '--pgfplotslibrary', action='store', type=str, default='',
         help='Pgfplots libraries to load, separated by comma, e.g., -g fillbetween.'
+        )
+    @argument(
+        '-n', '--glue_name', action='store', type=str, default=None,
+        help='Name to glue figure to, e.g., -n myfig. Default is None'
         )
     @argument(
         '-S', '--save', action='store', type=str, default=None,
@@ -283,8 +302,9 @@ class TikzMagics(Magics):
         pgfplots_library = args.pgfplotslibrary.split(',')
         latex_package = args.package.split(',')
         imagemagick_path = args.imagemagick
-        picture_options = args.pictureoptions
+        picture_options = args.pictureoptions.strip('"')
         tikz_options = args.tikzoptions
+        glue_name = args.glue_name
 
         # arguments 'code' in line are prepended to the cell lines
         if cell is None:
@@ -304,9 +324,6 @@ class TikzMagics(Magics):
         plot_dir = tempfile.mkdtemp().replace('\\', '/')
 
         add_params = ""
-
-        if plot_format == 'png' or plot_format == 'jpg' or plot_format == 'jpeg':
-            add_params += "density=300,"
 
         # choose between CircuiTikZ and regular Tikz
         if args.circuitikz:
@@ -366,10 +383,12 @@ class TikzMagics(Magics):
             self._publish_display_data(source=key, data={'text/plain': latex_log})
             return
 
+        self._convert_pdf_to_svg(plot_dir)
+
         if plot_format == 'jpg' or plot_format == 'jpeg':
             self._convert_png_to_jpg(plot_dir, imagemagick_path)
-        elif plot_format == 'svg':
-            self._convert_pdf_to_svg(plot_dir)
+        elif plot_format == 'png':
+            self._convert_svg_to_png(plot_dir, width, height)
 
         image_filename = "%s/tikz.%s" % (plot_dir, plot_format)
 
@@ -380,6 +399,8 @@ class TikzMagics(Magics):
             width, height = [int(s) for s in size.split(',')]
             if plot_format == 'svg':
                 image = self._fix_gnuplot_svg_size(image, size=(width, height))
+            if glue_name:
+                glue(glue_name, image, display=False)
             display_data.append((key, {plot_mime_type: image}))
 
         except IOError:
